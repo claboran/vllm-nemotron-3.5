@@ -1,0 +1,8 @@
+# model weights + runtime caches
+cache/
+
+# local env / secrets
+.env
+
+*.log
+__pycache__/

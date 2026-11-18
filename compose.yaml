@@ -1,0 +1,48 @@
+# vLLM + NVIDIA Nemotron 3.5 Lightning 30B-A3B (NVFP4) on DGX Spark / GB10.
+#   cp .env.example .env && make models && make up
+# Settings come from .env; the serve command line is built by scripts/serve.sh.
+
+services:
+  vllm:
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:v0.27.1}
+    container_name: vllm-nemotron
+    gpus: all
+    ipc: host
+    restart: unless-stopped
+    user: "${RUN_UID:-1000}:${RUN_GID:-1000}"
+    ports:
+      - "${BIND:-127.0.0.1}:${PORT:-8000}:8000"
+    volumes:
+      - ${CACHE_DIR:-./cache}:/cache
+      - ./scripts/serve.sh:/serve.sh:ro
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    entrypoint: ["/bin/bash", "/serve.sh"]
+    environment:
+      # all caches on the mounted volume (container runs as non-root)
+      HOME: /cache/home
+      HF_HOME: /cache/huggingface
+      VLLM_CACHE_ROOT: /cache/vllm
+      TRITON_CACHE_DIR: /cache/triton
+      XDG_CACHE_HOME: /cache/xdg
+      HF_TOKEN: ${HF_TOKEN:-}
+      VLLM_API_KEY: ${API_KEY:-}
+      MODEL: ${MODEL:-nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4}
+      SERVED_MODEL_NAME: ${SERVED_MODEL_NAME:-nemotron-3.5-lightning}
+      MAX_MODEL_LEN: ${MAX_MODEL_LEN:-131072}
+      GPU_MEMORY_UTILIZATION: ${GPU_MEMORY_UTILIZATION:-0.75}
+      MAX_NUM_SEQS: ${MAX_NUM_SEQS:-16}
+      KV_CACHE_DTYPE: ${KV_CACHE_DTYPE:-fp8}
+      SPEC_METHOD: ${SPEC_METHOD:-dspark}
+      SPEC_TOKENS: ${SPEC_TOKENS:-3}
+      DSPARK_MODEL: ${DSPARK_MODEL:-nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4-DSpark}
+      DFLASH_MODEL: ${DFLASH_MODEL:-nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4-DFlash}
+      EXTRA_ARGS: ${EXTRA_ARGS:-}
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      # model load + torch.compile + CUDA graph capture take several minutes on first start
+      start_period: 20m

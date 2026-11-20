@@ -89,7 +89,7 @@ at the top of the log.
 | `MODEL` | `nvidia/…-NVFP4` | Hugging Face repo of the model |
 | `SERVED_MODEL_NAME` | `nemotron-3.5-lightning` | model name clients send in `"model"` |
 | `MAX_MODEL_LEN` | `131072` | max tokens per request (prompt + output) |
-| `GPU_MEMORY_UTILIZATION` | `0.75` | share of total memory vLLM reserves, see [Memory](#memory-on-gb10) |
+| `GPU_MEMORY_UTILIZATION` | `0.4` | share of total memory vLLM reserves, see [Memory](#memory-on-gb10) |
 | `MAX_NUM_SEQS` | `16` | max parallel sequences |
 | `KV_CACHE_DTYPE` | `fp8` | `fp8` or `auto` |
 | `SPEC_METHOD` | `dspark` | `dspark`, `dflash`, `mtp` or `none` |
@@ -148,10 +148,21 @@ vLLM enforces a JSON schema with constrained decoding, so `content` is always va
 With thinking on, the schema only applies to the answer after the reasoning; `content` still holds
 just the JSON (checked by the smoke test).
 
+**Schema `description` fields are not shown to the model.** vLLM uses the schema only to constrain
+the output. Put format requirements (dates, units, …) into the prompt, or enforce them with
+`pattern` in the schema, e.g. `{"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"}`.
+
 ### Tool calls
 
-`tools` / `tool_choice: "auto"` work as in the OpenAI API (parser `qwen3_coder`). For coding
-agents, NVIDIA recommends `"chat_template_kwargs": {"force_nonempty_content": true}`.
+`tools` work as in the OpenAI API (parser `qwen3_coder`). For coding agents, NVIDIA recommends
+`"chat_template_kwargs": {"force_nonempty_content": true}`.
+
+| `tool_choice` | Thinking | Behaviour (measured) |
+|---------------|----------|----------------------|
+| `"auto"` | on | calls the tool when appropriate ✅ |
+| `"auto"` | off | often answers from memory instead of calling the tool |
+| `{"type":"function","function":{"name":"…"}}` | off | exactly one call, clean ✅ |
+| `"required"` | any | ❌ repeats the call until `max_tokens` (vLLM constrains to an unbounded array) |
 
 ### Python (OpenAI client)
 
@@ -190,7 +201,9 @@ A community benchmark on DGX Spark (vLLM v0.27.1, 64k context, code prompts) mea
 | **DSpark** | **124** | **355** |
 
 Source: [Classmethod – DSpark / DFlash / MTP on DGX Spark](https://dev.classmethod.jp/en/articles/nvidia-nemotron-3-5-lightning-dspark-dflash-mtp-dgx-spark/).
-Our own numbers are in [COMPAT.md](COMPAT.md).
+
+Measured here (DSpark, 128k context, `make bench`): **124.6 tok/s** for a single request,
+**334 tok/s** aggregate at 8 parallel requests, draft acceptance ~60%. Details in [COMPAT.md](COMPAT.md).
 
 **About `moe_backend: triton` for MTP:** the MTP heads contain an MoE block. By default the
 drafter inherits the main model's `--moe-backend marlin`, which the drafter does not support, so
@@ -208,8 +221,8 @@ rest used as KV cache** for parallel requests. On GB10, CPU and GPU share the sa
 | `GPU_MEMORY_UTILIZATION` | Reserved | Note |
 |--------------------------|---------:|------|
 | 0.85 (NVIDIA recipe) | ~103 GB | only if nothing else runs on the machine |
-| **0.75 (default)** | ~90 GB | leaves room for the OS, IDE backend and tools |
-| 0.45 | ~55 GB | enough for 128k context and a few parallel requests; use this next to other GPU services |
+| 0.75 | ~92 GB measured | KV cache 68.5 GiB = 13.7M tokens; system keeps only ~20 GB available |
+| **0.4 (default)** | ~48 GB measured | KV cache 26 GiB = 5.2M tokens (40 × 128k); system keeps ~64 GB available; same speed |
 
 - vLLM refuses to start if less memory is free than requested. Stop other GPU services
   (e.g. llama.cpp containers) or lower the value.
@@ -218,6 +231,10 @@ rest used as KV cache** for parallel requests. On GB10, CPU and GPU share the sa
   for most uses.
 - The startup log tells you what you got: `GPU KV cache size: N tokens` and
   `Maximum concurrency for 131072 tokens per request: X`.
+
+Weights and overhead take a fixed ~22 GiB; everything above that becomes KV cache. Because only a
+few layers of this hybrid Mamba model keep a KV cache, 0.4 still holds 5.2M tokens. Smoke test and
+throughput were the same at 0.4 and 0.75 (within run-to-run variation); see [COMPAT.md](COMPAT.md).
 
 ## Why Marlin, not native FP4
 
@@ -244,8 +261,8 @@ make smoke    # or: scripts/smoke_test.py --base-url http://host:8000/v1 --api-k
 
 Checks: model listed · chat with thinking off (no reasoning) · thinking on (reasoning separated
 from content) · strict `json_schema` extraction of a German invoice with thinking off and on (all
-fields checked) · tool call · unauthenticated request rejected (if `API_KEY` is set). Exit code =
-number of failures.
+fields checked) · tool call with `auto` + thinking on and with a named `tool_choice` + thinking off ·
+unauthenticated request rejected (if `API_KEY` is set). Exit code = number of failures.
 
 ```bash
 make bench                                          # concurrency 1 and 8, temperature 0
@@ -275,7 +292,9 @@ on the GPU.
 | container `unhealthy` during the first start | compile + CUDA graph capture can take many minutes; watch `make logs` |
 | empty `content`, `finish_reason: length` | thinking used up `max_tokens` → raise it or disable thinking |
 | permission errors in `./cache` | `RUN_UID`/`RUN_GID` in `.env` do not match the owner of `./cache` |
-| Docker Hub TLS timeouts | `make pull` retries 5 times |
+| Docker Hub TLS timeouts | `make pull` retries 5 times; on a flaky network loop it until done (completed layers are kept) |
+| tool call repeated until `max_tokens` | `tool_choice: "required"`; use `"auto"` with thinking on, or a named `tool_choice` |
+| JSON field in the wrong format (e.g. date) | schema descriptions are not shown to the model; say it in the prompt or use `pattern` |
 
 ## Repository layout
 

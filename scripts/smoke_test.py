@@ -83,7 +83,8 @@ INVOICE_SCHEMA = {
     "properties": {
         "vendor": {"type": "string"},
         "invoiceNumber": {"type": "string"},
-        "invoiceDate": {"type": "string", "description": "ISO 8601 date (YYYY-MM-DD)"},
+        # descriptions are NOT shown to the model by vLLM; a pattern is enforced by the grammar
+        "invoiceDate": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
         "netAmount": {"type": "number"},
         "vatRate": {"type": "number", "description": "percent, e.g. 19"},
         "vat": {"type": "number"},
@@ -133,7 +134,8 @@ try:
     ok("answer contains Paris, reasoning separated") if "paris" in (m.get("content") or "").lower() and reasoning_of(m) \
         else bad("thinking on: expected answer in content and reasoning in reasoning field")
 
-    msgs = [{"role": "system", "content": "Extract the invoice data. Amounts as numbers. If something is unclear, say so in remark, else empty string."},
+    msgs = [{"role": "system", "content": "Extract the invoice data. Dates as YYYY-MM-DD, amounts as numbers, vatRate in percent. "
+                                          "If something is unclear, say so in remark, else empty string."},
             {"role": "user", "content": INVOICE_TEXT}]
     rf = {"type": "json_schema", "json_schema": {"name": "invoice", "strict": True, "schema": INVOICE_SCHEMA}}
 
@@ -146,20 +148,34 @@ try:
     check_invoice(m.get("content") or "", "json_schema/thinking on")
     ok("reasoning kept out of JSON content") if reasoning_of(m) else bad("no reasoning returned with thinking on")
 
-    step("6. tool calling")
     tools = [{"type": "function", "function": {
         "name": "get_exchange_rate", "description": "Get the exchange rate between two currencies",
         "parameters": {"type": "object", "properties": {"base": {"type": "string"}, "quote": {"type": "string"}},
                        "required": ["base", "quote"]}}}]
-    r, dt = chat([{"role": "user", "content": "How many US dollars is one euro today?"}], False, tools=tools,
-                 tool_choice="auto")
-    tc = r["choices"][0]["message"].get("tool_calls") or []
-    print(f"  tool_calls: {[(t['function']['name'], t['function']['arguments']) for t in tc]}  ({dt:.1f}s)")
-    if tc and tc[0]["function"]["name"] == "get_exchange_rate" and \
-            {"base", "quote"} <= set(json.loads(tc[0]["function"]["arguments"])):
-        ok("tool call")
-    else:
-        bad("tool call")
+    tq = [{"role": "user", "content": "How many US dollars is one euro today?"}]
+
+    def check_tool(r, dt, label):
+        c = r["choices"][0]
+        tc = c["message"].get("tool_calls") or []
+        print(f"  tool_calls: {[(t['function']['name'], t['function']['arguments']) for t in tc]}  "
+              f"({dt:.1f}s, {r['usage']['completion_tokens']} tokens, finish: {c['finish_reason']})")
+        if len(tc) == 1 and tc[0]["function"]["name"] == "get_exchange_rate" and c["finish_reason"] != "length" \
+                and {"base", "quote"} <= set(json.loads(tc[0]["function"]["arguments"])):
+            ok(label)
+        else:
+            bad(label)
+
+    # Without thinking, the model often answers from memory instead of calling a tool under
+    # tool_choice=auto; with thinking it decides to call. See COMPAT.md.
+    step("6a. tool calling, tool_choice=auto, thinking on")
+    check_tool(*chat(tq, True, tools=tools, tool_choice="auto"), "tool call (auto, thinking on)")
+
+    # tool_choice="required" is NOT used: vLLM constrains output to an unbounded array of calls and
+    # at temperature 0 the model repeats the call until max_tokens. A named tool_choice is clean.
+    step("6b. tool calling, named tool_choice, thinking off")
+    check_tool(*chat(tq, False, tools=tools, max_tokens=1024,
+                     tool_choice={"type": "function", "function": {"name": "get_exchange_rate"}}),
+               "tool call (named, thinking off)")
 
     step("7. authentication")
     if a.api_key:

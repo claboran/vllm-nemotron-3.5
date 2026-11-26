@@ -271,6 +271,8 @@ make down-monitoring
 Open `http://<spark-ip>:3001` and log in as `GRAFANA_ADMIN_USER`. The dashboard
 **"vLLM Nemotron"** is the home page.
 
+![Grafana dashboard "vLLM Nemotron": overview and throughput rows](images/vllm_nemotron-grafana.png)
+
 ```
  vllm-nemotron :8000 ── network "llm-metrics" ──► prometheus (scrape every 5 s) ──► grafana :3001 ◄── browser (LAN)
 ```

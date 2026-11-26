@@ -12,6 +12,8 @@ services:
     user: "${RUN_UID:-1000}:${RUN_GID:-1000}"
     ports:
       - "${BIND:-127.0.0.1}:${PORT:-8000}:8000"
+    # metrics: Prometheus from compose.monitoring.yaml scrapes vllm-nemotron:8000/metrics there
+    networks: [default, metrics]
     volumes:
       - ${CACHE_DIR:-./cache}:/cache
       - ./scripts/serve.sh:/serve.sh:ro
@@ -46,3 +48,10 @@ services:
       retries: 3
       # model load + torch.compile + CUDA graph capture take several minutes on first start
       start_period: 20m
+
+networks:
+  # Shared with compose.monitoring.yaml. Created once by `make network`
+  # (or: docker network create llm-metrics); no stack owns or removes it.
+  metrics:
+    name: llm-metrics
+    external: true

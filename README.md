@@ -2,8 +2,8 @@
 
 Run **NVIDIA Nemotron 3.5 Lightning 30B-A3B** (NVFP4) with **vLLM** as an OpenAI-compatible API
 on an NVIDIA **DGX Spark / GB10**, with Docker Compose. Includes a smoke test for the features
-applications usually depend on (thinking on/off, strict JSON-schema output, tool calls) and a
-small throughput benchmark.
+applications usually depend on (thinking on/off, strict JSON-schema output, tool calls), a
+small throughput benchmark and an optional Prometheus + Grafana stack with a dashboard.
 
 Based on NVIDIA's DGX Spark recipe from the
 [model card](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4), using the
@@ -21,6 +21,7 @@ pinned `vllm/vllm-openai:v0.27.1` image (no source build). Test results are in [
 - [Speculative decoding](#speculative-decoding)
 - [Memory on GB10](#memory-on-gb10)
 - [Why Marlin, not native FP4](#why-marlin-not-native-fp4)
+- [Monitoring](#monitoring)
 - [Testing](#testing)
 - [Security](#security)
 - [Troubleshooting](#troubleshooting)
@@ -253,6 +254,73 @@ What this means in practice:
   where the cost shows.
 - **Quality:** W4A16 is, if anything, slightly more accurate than W4A4, since activations stay in 16 bits.
 
+## Monitoring
+
+vLLM exposes Prometheus metrics on `/metrics`. [`compose.monitoring.yaml`](compose.monitoring.yaml)
+adds Prometheus and Grafana with a provisioned dashboard. Grafana is meant to be opened from
+other machines; Prometheus stays on localhost.
+
+```bash
+# once: set GRAFANA_ADMIN_PASSWORD in .env (openssl rand -base64 24)
+make up-monitoring      # Grafana on 0.0.0.0:3001 (login required), Prometheus on 127.0.0.1:9091
+make check-monitoring   # Prometheus/Grafana up, vLLM scraped, vllm:* series present, dashboard provisioned
+make logs-monitoring
+make down-monitoring
+```
+
+Open `http://<spark-ip>:3001` and log in as `GRAFANA_ADMIN_USER`. The dashboard
+**"vLLM Nemotron"** is the home page.
+
+![Grafana dashboard "vLLM Nemotron": overview and throughput rows](images/vllm_nemotron-grafana.png)
+
+```
+ vllm-nemotron :8000 ── network "llm-metrics" ──► prometheus (scrape every 5 s) ──► grafana :3001 ◄── browser (LAN)
+```
+
+Prometheus reaches vLLM by container name on the container port, so `BIND`/`PORT` do not
+matter. `llm-metrics` is an `external` network (created by `make network`, which `make up` and
+`make up-monitoring` run), so the two stacks start and stop independently. The llama-cpp-base
+project uses the same network name, and its Prometheus/Grafana use ports 9090/3000, so both
+monitoring stacks can run side by side.
+
+**Dashboard "vLLM Nemotron"** (filter by model name):
+
+| Row | Panels |
+|-----|--------|
+| Overview | server up · generation tok/s now · running · waiting · KV cache used · tokens and requests in range |
+| Throughput | generation tok/s · prompt tok/s (total / from prefix cache) · requests finished by reason · prefix cache hit ratio |
+| Latency | time to first token p50/p95/p99 · inter-token latency · end-to-end p50/p95 · queue/prefill/decode time · decode tok/s per request |
+| Concurrency & KV cache | running/waiting · KV cache usage · preemptions · prompt and output length per request |
+| Speculative decoding | draft acceptance rate · mean acceptance length · acceptance by draft position |
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `GRAFANA_BIND` | `127.0.0.1` (`.env.example`: `0.0.0.0`) | host address for Grafana; `0.0.0.0` = reachable from the LAN |
+| `GRAFANA_PORT` | `3001` | Grafana host port |
+| `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD` | `admin` / *(required)* | Grafana login; the stack does not start without a password |
+| `GRAFANA_ROOT_URL` | *(empty)* | public URL, e.g. `http://spark.local:3001`, for links Grafana generates |
+| `PROMETHEUS_BIND` / `PROMETHEUS_PORT` | `127.0.0.1` / `9091` | Prometheus host address and port (no authentication: keep it local) |
+| `PROMETHEUS_RETENTION` | `30d` | how long metrics are kept |
+| `PROMETHEUS_VERSION` / `GRAFANA_VERSION` | `v3.16.0` / `13.3.1` | image tags |
+
+Notes:
+
+- `GRAFANA_ADMIN_PASSWORD` is only applied when Grafana creates its database (first start).
+  To change it later: `docker compose -f compose.monitoring.yaml --profile monitoring exec grafana grafana cli admin reset-admin-password '<new>'`,
+  then update `.env` (`make check-monitoring` uses it).
+- Grafana is served over plain HTTP. That is fine on a trusted LAN; across untrusted networks use
+  a VPN or SSH tunnel (`ssh -L 3001:127.0.0.1:3001 <host>`), or put a TLS reverse proxy in front.
+  Docker-published ports bypass `ufw`; set `GRAFANA_BIND` to a specific LAN/VPN address to narrow access.
+- vLLM's `/metrics` is not protected by `API_KEY` (only `/v1/*` is). With `BIND=0.0.0.0` it is
+  readable from the LAN; it contains counters and the model name, no prompts.
+- With speculative decoding, vLLM emits several tokens per step, so **inter-token latency** is
+  the time between chunks; use **Decode speed per request** for tok/s per request.
+- The containers started before this change are not on `llm-metrics`; `make restart` recreates
+  vLLM with the network.
+- After bumping `VLLM_IMAGE`, run `make check-monitoring`: it fails if metric names changed.
+- The dashboard can be edited in Grafana, but the provisioned file can overwrite those changes.
+  To keep them, export the JSON to `monitoring/grafana/dashboards/vllm.json`.
+
 ## Testing
 
 ```bash
@@ -280,6 +348,8 @@ on the GPU.
   (including an IDE remote backend running there).
 - For LAN access set `BIND=0.0.0.0` **and** `API_KEY=$(openssl rand -hex 32)`. Ports published by
   Docker bypass `ufw` rules.
+- Monitoring: Grafana requires a login (`GRAFANA_ADMIN_PASSWORD`, no default, anonymous access
+  off); Prometheus has no authentication and is bound to localhost. See [Monitoring](#monitoring).
 - The container runs as your user (not root) and only mounts `./cache` and `serve.sh` (read-only).
 
 ## Troubleshooting
@@ -292,6 +362,9 @@ on the GPU.
 | container `unhealthy` during the first start | compile + CUDA graph capture can take many minutes; watch `make logs` |
 | empty `content`, `finish_reason: length` | thinking used up `max_tokens` → raise it or disable thinking |
 | permission errors in `./cache` | `RUN_UID`/`RUN_GID` in `.env` do not match the owner of `./cache` |
+| Grafana panel shows *No data* / server DOWN | vLLM still loading, or created before monitoring existed → `make restart`; then `make check-monitoring` |
+| `set GRAFANA_ADMIN_PASSWORD in .env` | `make up-monitoring` refuses to start Grafana without a password |
+| Grafana login fails after changing the password in `.env` | only applied on first start → `grafana cli admin reset-admin-password` (see [Monitoring](#monitoring)) |
 | Docker Hub TLS timeouts | `make pull` retries 5 times; on a flaky network loop it until done (completed layers are kept) |
 | tool call repeated until `max_tokens` | `tool_choice: "required"`; use `"auto"` with thinking on, or a named `tool_choice` |
 | JSON field in the wrong format (e.g. date) | schema descriptions are not shown to the model; say it in the prompt or use `pattern` |
@@ -301,12 +374,17 @@ on the GPU.
 ```
 .
 ├── compose.yaml          # vLLM service (GPU, port, caches, health check)
+├── compose.monitoring.yaml  # Prometheus + Grafana
 ├── .env.example          # all settings, copy to .env
-├── Makefile              # pull / models / up / down / logs / smoke / bench
+├── Makefile              # pull / models / up / down / logs / smoke / bench, *-monitoring
+├── monitoring/
+│   ├── prometheus/prometheus.yml    # scrape config (vllm-nemotron:8000)
+│   └── grafana/                     # datasource + dashboard provisioning, dashboards/vllm.json
 ├── scripts/
 │   ├── serve.sh          # container entrypoint: builds `vllm serve …` from env
 │   ├── smoke_test.py     # functional checks (stdlib only)
-│   └── bench.py          # throughput benchmark (stdlib only)
+│   ├── bench.py          # throughput benchmark (stdlib only)
+│   └── monitoring-check.sh  # checks the monitoring stack
 ├── COMPAT.md             # tested combinations and measured results
 └── cache/                # (git-ignored) weights + compile caches
 ```

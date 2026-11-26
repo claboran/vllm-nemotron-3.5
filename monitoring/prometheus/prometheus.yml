@@ -1,0 +1,18 @@
+# Prometheus config for the vLLM server (compose.monitoring.yaml).
+# The target is reached over the shared Docker network "llm-metrics" by container name on the
+# container port 8000, so the host port and BIND do not matter. vLLM's /metrics is not behind
+# API_KEY (only /v1/* is), so no token is needed. While vLLM is stopped the target is "down".
+global:
+  scrape_interval: 5s
+  scrape_timeout: 4s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: vllm
+    static_configs:
+      - targets: [vllm-nemotron:8000]
+        labels: {service: nemotron}
+
+  - job_name: prometheus
+    static_configs:
+      - targets: [localhost:9090]

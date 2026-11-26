@@ -1,0 +1,65 @@
+# Prometheus + Grafana for the vLLM server (throughput, latency, KV cache, speculative decoding).
+#   make up-monitoring      (= docker compose -f compose.monitoring.yaml --profile monitoring up -d)
+# Prometheus scrapes vLLM's /metrics over the shared Docker network "llm-metrics" (created by
+# `make network`), which compose.yaml also joins. Start order does not matter.
+# Settings: GRAFANA_* / PROMETHEUS_* in .env.
+#
+# Grafana:    http://<host>:3001  (dashboard "vLLM Nemotron", home page) - reachable from remote
+#             when GRAFANA_BIND=0.0.0.0; login required, GRAFANA_ADMIN_PASSWORD must be set.
+# Prometheus: http://127.0.0.1:9091 (no authentication, therefore localhost only by default)
+# Ports 3001/9091 so this stack runs next to the llama-cpp-base one (3000/9090).
+
+name: vllm-nemotron-monitoring
+
+services:
+  prometheus:
+    image: prom/prometheus:${PROMETHEUS_VERSION:-v3.16.0}
+    profiles: [monitoring]
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-30d}
+    ports:
+      - "${PROMETHEUS_BIND:-127.0.0.1}:${PROMETHEUS_PORT:-9091}:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks: [default, metrics]
+
+  grafana:
+    image: grafana/grafana:${GRAFANA_VERSION:-13.3.1}
+    profiles: [monitoring]
+    restart: unless-stopped
+    depends_on: [prometheus]
+    ports:
+      - "${GRAFANA_BIND:-127.0.0.1}:${GRAFANA_PORT:-3001}:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      # Required, no default: Grafana is meant to be reachable from other machines.
+      # Only applied when the Grafana database is created (first start); see README.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
+      GF_SERVER_ROOT_URL: ${GRAFANA_ROOT_URL:-}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SECURITY_COOKIE_SAMESITE: lax
+      GF_SECURITY_DISABLE_GRAVATAR: "true"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/vllm.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+
+volumes:
+  prometheus-data:
+  grafana-data:
+
+networks:
+  # Shared with compose.yaml (and with the llama-cpp-base stacks). Created once by
+  # `make network` (or: docker network create llm-metrics); no stack owns or removes it.
+  metrics:
+    name: llm-metrics
+    external: true
